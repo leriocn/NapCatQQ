@@ -32,14 +32,23 @@ export default class QQManager {
 
   public static async checkQQLoginStatusWithQrcode () {
     const data = await serverRequest.post<
-      ServerResponse<{ qrcodeurl: string; isLogin: boolean; isOffline?: boolean; loginError?: string; }>
+      ServerResponse<{
+        qrcodeurl: string;
+        isLogin: boolean;
+        isOffline?: boolean;
+        loginError?: string;
+        loginPhase?: 'waiting_qrcode' | 'generating_qrcode' | 'qrcode_scanned' | 'initializing' | 'ready' | 'offline' | 'reconnecting';
+        qrLoginAccepted?: boolean;
+        coreReady?: boolean;
+      }>
     >('/QQLogin/CheckLoginStatus');
 
     return data.data.data;
   }
 
   public static async refreshQRCode () {
-    await serverRequest.post<ServerResponse<null>>('/QQLogin/RefreshQRcode');
+    const data = await serverRequest.post<ServerResponse<{ qrcodeurl: string; restarting?: boolean; }>>('/QQLogin/RefreshQRcode');
+    return data.data.data;
   }
 
   public static async getQQLoginQrcode () {
@@ -50,14 +59,6 @@ export default class QQManager {
     >('/QQLogin/GetQQLoginQrcode');
 
     return data.data.data.qrcode;
-  }
-
-  public static async getQQQuickLoginList () {
-    const data = await serverRequest.post<ServerResponse<string[]>>(
-      '/QQLogin/GetQuickLoginList'
-    );
-
-    return data.data.data;
   }
 
   public static async getQQQuickLoginListNew () {
@@ -260,6 +261,57 @@ export default class QQManager {
 
   public static async resetLinuxDeviceID () {
     await serverRequest.post<ServerResponse<null>>('/QQLogin/ResetLinuxDeviceID');
+  }
+
+  // ============================================================
+  // macOS GUID 管理
+  // ============================================================
+
+  public static async getMacGUIDInfo () {
+    const data = await serverRequest.post<ServerResponse<{
+      guid: string;
+      guidUuid: string;
+      machineId: string;
+      sn: string;
+      mac: string;
+      platformUuid: string;
+      source: 'machineid-info' | 'mac-fallback';
+    }>>('/QQLogin/GetMacGUIDInfo');
+    return data.data.data;
+  }
+
+  public static async getMacHardwareInfo () {
+    const data = await serverRequest.post<ServerResponse<{
+      platformUuid: string;
+      serialNumber: string;
+      diskSerial: string;
+      mac: string;
+    }>>('/QQLogin/GetMacHardwareInfo');
+    return data.data.data;
+  }
+
+  public static async setMacMachineId (machineId: string, sn?: string) {
+    const data = await serverRequest.post<ServerResponse<{ guid: string; guidUuid: string; }>>(
+      '/QQLogin/SetMacMachineId', { machineId, sn });
+    return data.data.data;
+  }
+
+  public static async getMacInfoBackups () {
+    const data = await serverRequest.post<ServerResponse<string[]>>('/QQLogin/GetMacInfoBackups');
+    return data.data.data;
+  }
+
+  public static async createMacInfoBackup () {
+    const data = await serverRequest.post<ServerResponse<{ path: string; }>>('/QQLogin/CreateMacInfoBackup');
+    return data.data.data;
+  }
+
+  public static async restoreMacInfoBackup (backupName: string) {
+    await serverRequest.post<ServerResponse<null>>('/QQLogin/RestoreMacInfoBackup', { backupName });
+  }
+
+  public static async resetMacDeviceID () {
+    await serverRequest.post<ServerResponse<null>>('/QQLogin/ResetMacDeviceID');
   }
 
   // ============================================================

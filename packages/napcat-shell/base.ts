@@ -37,9 +37,12 @@ import { OidbSvcTrpcTcpBase, OidbSvcTrpcTcp0XCDE_2RespBody } from '@/napcat-core
 import { loadNapcatConfig } from '@/napcat-core/helper/config';
 import { logSubscription, LogWrapper } from '@/napcat-core/helper/log';
 import { proxiedListenerOf } from '@/napcat-core/helper/proxy-handler';
+import { createOfflineRecovery } from '@/napcat-core/helper/offline-recovery';
 import { QQBasicInfoWrapper } from '@/napcat-core/helper/qq-basic-info';
 import { statusHelperSubscription } from '@/napcat-core/helper/status';
 import { applyPendingUpdates } from '@/napcat-webui-backend/src/api/UpdateNapCat';
+import { migrateLegacyGlobalPath } from './global-migrate';
+import { getDataPaths } from './data-path';
 import { connectToNamedPipe } from './pipe';
 
 // NapCat Shell App ES 入口文件
@@ -50,21 +53,6 @@ async function handleUncaughtExceptions (logger: LogWrapper) {
   process.on('unhandledRejection', (reason) => {
     logger.logError('[NapCat] [Error] unhandledRejection:', reason);
   });
-}
-
-function getDataPaths (wrapper: WrapperNodeApi): [string, string] {
-  if (os.platform() === 'darwin') {
-    const userPath = os.homedir();
-    const appDataPath = path.resolve(userPath, './Library/Application Support/QQ');
-    return [appDataPath, path.join(appDataPath, 'global')];
-  }
-  let dataPath = wrapper.NodeQQNTWrapperUtil.getNTUserDataInfoConfig();
-  if (!dataPath) {
-    dataPath = path.resolve(os.homedir(), './.config/QQ');
-    fs.mkdirSync(dataPath, { recursive: true });
-  }
-  const dataPathGlobal = path.resolve(dataPath, './nt_qq/global');
-  return [dataPath, dataPathGlobal];
 }
 
 function getPlatformType (): PlatformType {
@@ -126,7 +114,7 @@ async function handleLogin (
   quickLoginUin: string | undefined,
   historyLoginList: LoginListItem[]
 ): Promise<SelfInfo> {
-  const context = { isLogined: false };
+  const context = { isLogined: false, loginFlowInitialized: false };
   let inner_resolve: (value: SelfInfo) => void;
   const selfInfo: Promise<SelfInfo> = new Promise((resolve) => {
     inner_resolve = resolve;
@@ -142,6 +130,14 @@ async function handleLogin (
   loginListener.onQRCodeLoginSucceed = async (loginResult) => {
     context.isLogined = true;
     WebUiDataRuntime.setQQLoginStatus(true);
+    WebUiDataRuntime.setQQLoginError('');
+    const oneBotContext = WebUiDataRuntime.getOneBotContext();
+    if (oneBotContext?.core?.selfInfo) {
+      oneBotContext.core.selfInfo.online = true;
+      WebUiDataRuntime.setQQLoginPhase('ready');
+    } else {
+      WebUiDataRuntime.setQQLoginPhase('initializing');
+    }
     inner_resolve({
       uid: loginResult.uid,
       uin: loginResult.uin,
@@ -149,14 +145,35 @@ async function handleLogin (
       online: true,
     });
   };
+  loginListener.onLoginDisConnected = () => {
+    context.isLogined = false;
+    WebUiDataRuntime.setQQLoginStatus(false);
+    WebUiDataRuntime.setQQLoginPhase('offline');
+    logger.logWarn('[Core] [Login] 登录服务已断开，将允许重新获取二维码');
+  };
+  loginListener.onLogoutSucceed = () => {
+    context.isLogined = false;
+    WebUiDataRuntime.setQQLoginStatus(false);
+    WebUiDataRuntime.setQQLoginPhase('offline');
+  };
   loginListener.onLoginConnected = () => {
-    waitForNetworkConnection(loginService, logger).then(() => {
-      handleLoginInner(context, logger, loginService, quickLoginUin, historyLoginList).then().catch(e => logger.logError(e));
-      loginListener.onLoginConnected = () => { };
-    });
+    waitForNetworkConnection(loginService, logger).then(async () => {
+      if (!context.loginFlowInitialized) {
+        context.loginFlowInitialized = true;
+        await handleLoginInner(context, logger, loginService, quickLoginUin, historyLoginList);
+        return;
+      }
+      if (!context.isLogined) {
+        WebUiDataRuntime.setQQLoginPhase('generating_qrcode');
+        const requested = loginService.getQRCodePicture();
+        logger.logWarn('[Core] [Login] 登录服务重连完成，正在获取二维码', { requested, msfStatus: loginService.getMsfStatus() });
+      }
+    }).catch(e => logger.logError(e));
   };
   loginListener.onQRCodeGetPicture = ({ pngBase64QrcodeData, qrcodeUrl }) => {
     WebUiDataRuntime.setQQLoginQrcodeURL(qrcodeUrl);
+    WebUiDataRuntime.setQQLoginError('');
+    WebUiDataRuntime.setQQLoginPhase('waiting_qrcode');
 
     const realBase64 = pngBase64QrcodeData.replace(/^data:image\/\w+;base64,/, '');
     const buffer = Buffer.from(realBase64, 'base64');
@@ -175,14 +192,20 @@ async function handleLogin (
     });
   };
 
+  loginListener.onQRCodeSessionUserScaned = () => {
+    WebUiDataRuntime.setQQLoginPhase('qrcode_scanned');
+    logger.log('[Core] [Login] 二维码已被扫描，等待确认...');
+  };
+
   loginListener.onQRCodeSessionFailed = (errType: number, errCode: number) => {
     if (!context.isLogined) {
       logger.logError('[Core] [Login] Login Error,ErrType: ', errType, ' ErrCode:', errCode);
       if (errType === 1 && errCode === 3) {
-        // 二维码过期刷新
+        // 仅二维码过期时自动请求下一张二维码。账号被踢下线等其他错误
+        // 需要由用户触发刷新，避免每两秒重复创建原生登录会话。
         WebUiDataRuntime.setQQLoginError('二维码已过期，请刷新');
+        loginService.getQRCodePicture();
       }
-      loginService.getQRCodePicture();
     }
   };
 
@@ -196,7 +219,7 @@ async function handleLogin (
   loginService.connect();
   return await selfInfo;
 }
-async function handleLoginInner (context: { isLogined: boolean; }, logger: LogWrapper, loginService: NodeIKernelLoginService, quickLoginUin: string | undefined, historyLoginList: LoginListItem[]) {
+async function handleLoginInner (context: { isLogined: boolean; loginFlowInitialized: boolean; }, logger: LogWrapper, loginService: NodeIKernelLoginService, quickLoginUin: string | undefined, historyLoginList: LoginListItem[]) {
   const resolveQuickPasswordMd5 = (): string | undefined => {
     const quickPasswordMd5 = process.env['NAPCAT_QUICK_PASSWORD_MD5']?.trim();
     if (quickPasswordMd5) {
@@ -217,7 +240,19 @@ async function handleLoginInner (context: { isLogined: boolean; }, logger: LogWr
 
   // 注册刷新二维码回调
   WebUiDataRuntime.setRefreshQRCodeCallback(async () => {
-    loginService.getQRCodePicture();
+    context.isLogined = false;
+    const msfStatus = loginService.getMsfStatus();
+    if (msfStatus === 2) {
+      // KickedOffLine 会在后台负责重启 Worker。这里不能重启：该回调由
+      // RefreshQRcode HTTP 请求触发，重启会中断正在等待响应的请求。
+      WebUiDataRuntime.setQQLoginPhase('reconnecting');
+      throw new Error('QQ_LOGIN_SERVICE_RESTARTING');
+    }
+    const requested = loginService.getQRCodePicture();
+    logger.logWarn('[Core] [Login] 请求刷新二维码', { requested, msfStatus });
+    if (!requested) {
+      throw new Error('QQ 未接受二维码刷新请求');
+    }
   });
 
   WebUiDataRuntime.setQuickLoginCall(async (uin: string) => {
@@ -666,6 +701,7 @@ export async function NCoreInitShell () {
     }
   }
   const [dataPath, dataPathGlobal] = getDataPaths(wrapper);
+  migrateLegacyGlobalPath(dataPath, dataPathGlobal, logger);
   WebUiDataRuntime.setQQDataPath(dataPath);
   const systemPlatform = getPlatformType();
 
@@ -792,11 +828,39 @@ export class NapCatShell {
     //   }
     // }
 
-    // 监听下线通知并同步到 WebUI
-    this.core.event.on('KickedOffLine', (tips: string) => {
-      WebUiDataRuntime.setQQLoginStatus(false);
-      WebUiDataRuntime.setQQLoginError(tips);
+    // 监听下线并同步到 WebUI
+    // KickedOffLine：账号被踢下线；SelfOffline：静默离线（服务端会话语义失效但无通知）。
+    // 两者复用同一条恢复链路：同步 WebUI -> 重启 Worker -> 快速登录。
+    const handleOffline = createOfflineRecovery({
+      isOnline: () => this.core.selfInfo.online === true,
+      onOffline: (tips) => {
+        WebUiDataRuntime.setQQLoginStatus(false);
+        // 下线后的二维码已失效，绝不能继续交给页面展示或扫码。
+        WebUiDataRuntime.setQQLoginQrcodeURL('');
+        WebUiDataRuntime.setQQLoginError(tips);
+        WebUiDataRuntime.setQQLoginPhase('reconnecting');
+      },
+      onRecovered: () => {
+        WebUiDataRuntime.setQQLoginStatus(true);
+        WebUiDataRuntime.setQQLoginError('');
+        WebUiDataRuntime.setQQLoginPhase('ready');
+      },
+      restart: async (tips) => {
+        try {
+          const restartResult = await WebUiDataRuntime.requestRestartProcess();
+          this.context.logger.logWarn('[Core] [Login] 账号已离线，正在重启 Worker 以重新创建 QQ 登录服务', restartResult);
+          if (restartResult.result) return true;
+          WebUiDataRuntime.setQQLoginPhase('offline');
+          WebUiDataRuntime.setQQLoginError(`${tips}\n登录服务重启失败：${restartResult.message}`);
+        } catch (error) {
+          WebUiDataRuntime.setQQLoginPhase('offline');
+          WebUiDataRuntime.setQQLoginError(`${tips}\n登录服务重启失败：${(error as Error).message}`);
+        }
+        return false;
+      },
     });
+    this.core.event.on('KickedOffLine', (tips: string) => handleOffline(tips, false));
+    this.core.event.on('SelfOffline', (tips: string) => handleOffline(tips, true));
     // 使用 NapCatAdapterManager 统一管理协议适配器
     const adapterManager = new NapCatAdapterManager(this.core, this.context, this.context.pathWrapper);
     await adapterManager.initAdapters()
@@ -805,6 +869,9 @@ export class NapCatShell {
     const oneBotAdapter = adapterManager.getOneBotAdapter();
     if (oneBotAdapter) {
       WebUiDataRuntime.setOneBotContext(oneBotAdapter);
+      if (WebUiDataRuntime.getQQLoginStatus()) {
+        WebUiDataRuntime.setQQLoginPhase('ready');
+      }
     }
   }
 }

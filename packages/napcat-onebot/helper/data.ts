@@ -1,3 +1,4 @@
+import { profileRegionArea } from '@/napcat-core/helper/profile-region';
 import { calcQQLevel } from 'napcat-common/src/helper';
 import { FileNapCatOneBotUUID } from 'napcat-common/src/file-uuid';
 import { FriendV2, Group, GroupFileInfoUpdateParamType, GroupMember, SelfInfo, NTSex } from 'napcat-core';
@@ -70,7 +71,7 @@ export class OB11Construct {
     }[sex] || OB11UserSex.unknown;
   }
 
-  static groupMember (group_id: string, member: GroupMember): OB11GroupMember {
+  static groupMember (group_id: string, member: GroupMember & { country?: string; province?: string; city?: string }): OB11GroupMember {
     return {
       group_id: +group_id,
       user_id: +member.uin,
@@ -78,7 +79,7 @@ export class OB11Construct {
       card: member.cardName,
       sex: this.sex(member.sex),
       age: member.age ?? 0,
-      area: '',
+      area: profileRegionArea(member),
       level: member.memberRealLevel?.toString() ?? '0',
       qq_level: (member.qqLevel && calcQQLevel(member.qqLevel)) || 0,
       join_time: +member.joinTime,
@@ -111,7 +112,7 @@ export class OB11Construct {
   static file (peerId: string, file: Exclude<GroupFileInfoUpdateParamType['item'][0]['fileInfo'], undefined>): OB11GroupFile {
     return {
       group_id: +peerId,
-      file_id: FileNapCatOneBotUUID.encodeModelId({ chatType: 2, peerUid: peerId }, file.fileModelId, file.fileId, file.fileId ?? ''),
+      file_id: FileNapCatOneBotUUID.encodeGroupFile({ chatType: 2, peerUid: peerId }, file),
       file_name: file.fileName,
       busid: file.busId,
       size: +file.fileSize,
@@ -135,6 +136,9 @@ export class OB11Construct {
       creator: +folder.createUin,
       creator_name: folder.creatorName,
       total_file_count: folder.totalFileCount,
+      modify_time: folder.modifyTime,
+      modifier: +folder.modifyUin,
+      modifier_name: folder.modifyName,
     };
   }
 }

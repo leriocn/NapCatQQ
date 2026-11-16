@@ -9,6 +9,8 @@ import {
   NTQQFlashApi,
   NTQQOnlineApi,
   NTQQDatabaseApi,
+  NTQQQzoneApi,
+  NTQQQzonePublicApi,
 } from '@/napcat-core/apis';
 import { NTQQCollectionApi } from '@/napcat-core/apis/collection';
 import {
@@ -21,7 +23,7 @@ import {
 } from '@/napcat-core/wrapper';
 import { LogLevel, LogWrapper } from '@/napcat-core/helper/log';
 import { QQBasicInfoWrapper } from '@/napcat-core/helper/qq-basic-info';
-import { NapCatPathWrapper } from 'napcat-common/src/path';
+import { getQQDataDirOverride, NapCatPathWrapper } from 'napcat-common/src/path';
 import path from 'node:path';
 import fs from 'node:fs';
 import { hostname, systemName, systemVersion } from 'napcat-common/src/system';
@@ -59,12 +61,30 @@ export enum NapCatCoreWorkingEnv {
   Framework = 2,
 }
 
+function dlopenWrapper (wrapperPath: string): WrapperNodeApi {
+  const nativemodule: { exports: WrapperNodeApi; } = { exports: {} as WrapperNodeApi };
+  try {
+    process.dlopen(nativemodule, wrapperPath);
+  } catch (error) {
+    // QQNT.dll 依赖媒体基础（mfplat.dll 等），Windows Server 默认不装这个组件。
+    // 缺了它系统只会报 The specified module could not be found，看不出缺的是什么
+    const mfplatPath = path.join(process.env['SystemRoot'] || 'C:\\Windows', 'System32', 'mfplat.dll');
+    if (os.platform() === 'win32' && !fs.existsSync(mfplatPath)) {
+      throw new Error(
+        '加载 wrapper.node 失败：系统缺少「媒体基础」组件（找不到 mfplat.dll），Windows Server 默认不安装它。' +
+        '请在服务器管理器的「添加角色和功能」里勾选「媒体基础」，' +
+        '或在管理员 PowerShell 中执行 Install-WindowsFeature Server-Media-Foundation，重启后再启动。' +
+        `原始错误：${(error as Error).message}`
+      );
+    }
+    throw error;
+  }
+  return nativemodule.exports;
+}
+
 export function loadQQWrapper (execPath: string | undefined, QQVersion: string): WrapperNodeApi {
   if (process.env['NAPCAT_WRAPPER_PATH']) {
-    const wrapperPath = process.env['NAPCAT_WRAPPER_PATH'];
-    const nativemodule: { exports: WrapperNodeApi; } = { exports: {} as WrapperNodeApi };
-    process.dlopen(nativemodule, wrapperPath);
-    return nativemodule.exports;
+    return dlopenWrapper(process.env['NAPCAT_WRAPPER_PATH']);
   }
   if (!execPath) {
     throw new Error('无法加载Wrapper，execPath未定义');
@@ -85,10 +105,9 @@ export function loadQQWrapper (execPath: string | undefined, QQVersion: string):
   if (!fs.existsSync(wrapperNodePath)) {
     wrapperNodePath = path.join(path.dirname(execPath), `./resources/app/versions/${QQVersion}/wrapper.node`);
   }
-  const nativemodule: { exports: WrapperNodeApi; } = { exports: {} as WrapperNodeApi };
-  process.dlopen(nativemodule, wrapperNodePath);
+  const exports = dlopenWrapper(wrapperNodePath);
   process.env['NAPCAT_WRAPPER_PATH'] = wrapperNodePath;
-  return nativemodule.exports;
+  return exports;
 }
 export function getMajorPath (execPath: string, QQVersion: string): string {
   // major.node
@@ -154,6 +173,8 @@ export class NapCatCore {
       FlashApi: new NTQQFlashApi(this.context, this),
       OnlineApi: new NTQQOnlineApi(this.context, this),
       DatabaseApi: new NTQQDatabaseApi(this.context, this),
+      QzoneApi: new NTQQQzoneApi(this.context, this),
+      QzonePublicApi: new NTQQQzonePublicApi(this.context, this),
     };
     container.bind(NapCatCore).toConstantValue(this);
     container.bind(TypedEventEmitter).toConstantValue(this.event);
@@ -219,6 +240,8 @@ export class NapCatCore {
   }
 
   get dataPath (): string {
+    const override = getQQDataDirOverride();
+    if (override) return override;
     let result = this.context.wrapper.NodeQQNTWrapperUtil.getNTUserDataInfoConfig();
     if (!result) {
       result = path.resolve(os.homedir(), './.config/QQ');
@@ -261,8 +284,14 @@ export class NapCatCore {
     };
     profileListener.onSelfStatusChanged = (Info: SelfStatusInfo) => {
       if (Info.status === 20) {
+        // 静默离线：服务端判定会话失效，但不会下发 KickedOffLine 通知。
+        // 仅在 在线 -> 离线 的跳变上广播一次，供上层复用下线恢复链路。
+        const wasOnline = this.selfInfo.online === true;
         this.selfInfo.online = false;
         this.context.logger.log('账号状态变更为离线');
+        if (wasOnline) {
+          this.event.emit('SelfOffline', '[SelfOffline] 账号状态变更为离线（未收到 KickedOffLine 通知）');
+        }
       } else {
         this.selfInfo.online = true;
       }
@@ -359,4 +388,6 @@ export interface StableNTApiWrapper {
   FlashApi: NTQQFlashApi,
   OnlineApi: NTQQOnlineApi,
   DatabaseApi: NTQQDatabaseApi,
+  QzoneApi: NTQQQzoneApi,
+  QzonePublicApi: NTQQQzonePublicApi,
 }

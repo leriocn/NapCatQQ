@@ -75,6 +75,7 @@ import { SetInputStatus } from './extends/SetInputStatus';
 import { GetCSRF } from './system/GetCSRF';
 import { DelGroupNotice } from './group/DelGroupNotice';
 import { GetGroupInfoEx } from './extends/GetGroupInfoEx';
+import { GetGroupShareLink } from './extends/GetGroupShareLink';
 import { DeleteGroupFile } from '@/napcat-onebot/action/go-cqhttp/DeleteGroupFile';
 import { CreateGroupFileFolder } from '@/napcat-onebot/action/go-cqhttp/CreateGroupFileFolder';
 import { DeleteGroupFileFolder } from '@/napcat-onebot/action/go-cqhttp/DeleteGroupFileFolder';
@@ -133,6 +134,8 @@ import { CancelGroupTodo } from './packet/CancelGroupTodo';
 import { SetGroupTodo } from './packet/SetGroupTodo';
 import { GetQunAlbumList } from './extends/GetQunAlbumList';
 import { UploadImageToQunAlbum } from './extends/UploadImageToQunAlbum';
+import { UploadImagesToQunAlbum } from './extends/UploadImagesToQunAlbum';
+import { UploadVideoToQunAlbum } from './extends/UploadVideoToQunAlbum';
 import { DoGroupAlbumComment } from './extends/DoGroupAlbumComment';
 import { GetGroupAlbumMediaList } from './extends/GetGroupAlbumMediaList';
 import { SetGroupAlbumMediaLike, CancelGroupAlbumMediaLike } from './extends/SetGroupAlbumMediaLike';
@@ -162,6 +165,37 @@ import { FetchPttText } from '@/napcat-onebot/action/msg/FetchPttText';
 import { GetGroupSignedList } from './extends/GetGroupSignedList';
 import { SendQzoneMsg } from './extends/SendQzoneMsg';
 import { DeleteQzoneMsg } from './extends/DeleteQzoneMsg';
+import { GetQzoneFeeds } from './extends/qzone/GetQzoneFeeds';
+import { GetQzoneMsgList } from './extends/qzone/GetQzoneMsgList';
+import { GetQzoneMsgDetail } from './extends/qzone/GetQzoneMsgDetail';
+import { GetQzoneCommentList } from './extends/qzone/GetQzoneCommentList';
+import { GetQzoneCommentReplies } from './extends/qzone/GetQzoneCommentReplies';
+import { LikeQzone } from './extends/qzone/LikeQzone';
+import { UnlikeQzone } from './extends/qzone/UnlikeQzone';
+import { CommentQzone } from './extends/qzone/CommentQzone';
+import { GetQzoneProfile } from './extends/qzone/GetQzoneProfile';
+import { SetQzoneProfile } from './extends/qzone/SetQzoneProfile';
+import { SetQzoneMsgRight } from './extends/qzone/SetQzoneMsgRight';
+import { SetQzoneBan } from './extends/qzone/SetQzoneBan';
+import {
+  GetQzonePublicCapabilities,
+  GetQzonePublicFeeds,
+  GetQzonePublicFeedDetail,
+  GetQzonePublicComments,
+  GetQzonePublicReplies,
+  SetQzonePublicUpvote,
+  SetQzonePublicLike,
+  SetQzonePublicFollow,
+  SetQzonePublicCommentLike,
+  CommentQzonePublicFeed,
+  ReplyQzonePublicFeed,
+  DeleteQzonePublicComment,
+  DeleteQzonePublicReply,
+  ForwardQzonePublicFeed,
+} from './extends/qzone-public';
+import SetGroupMemberInvitePolicy from './group/SetGroupMemberInvitePolicy';
+import SetGroupMemberPermissions from './group/SetGroupMemberPermissions';
+import SetGroupNewMemberHistoryVisibility from './group/SetGroupNewMemberHistoryVisibility';
 
 export function getAllHandlers (obContext: NapCatOneBot11Adapter, core: NapCatCore) {
   const actionHandlers = [
@@ -178,6 +212,8 @@ export function getAllHandlers (obContext: NapCatOneBot11Adapter, core: NapCatCo
     new GetGroupAlbumMediaList(obContext, core),
     new GetQunAlbumList(obContext, core),
     new UploadImageToQunAlbum(obContext, core),
+    new UploadImagesToQunAlbum(obContext, core),
+    new UploadVideoToQunAlbum(obContext, core),
     new SetGroupTodo(obContext, core),
     new CompleteGroupTodo(obContext, core),
     new CancelGroupTodo(obContext, core),
@@ -193,6 +229,7 @@ export function getAllHandlers (obContext: NapCatOneBot11Adapter, core: NapCatCo
     new GetRkeyServer(obContext, core),
     new SetGroupRemark(obContext, core),
     new GetGroupInfoEx(obContext, core),
+    new GetGroupShareLink(obContext, core),
     new FetchEmojiLike(obContext, core),
     new GetEmojiLikes(obContext, core),
     new FetchPttText(obContext, core),
@@ -220,6 +257,35 @@ export function getAllHandlers (obContext: NapCatOneBot11Adapter, core: NapCatCo
     new GetGroupSignedList(obContext, core),
     new SendQzoneMsg(obContext, core),
     new DeleteQzoneMsg(obContext, core),
+    new GetQzoneFeeds(obContext, core),
+    new GetQzoneMsgList(obContext, core),
+    new GetQzoneMsgDetail(obContext, core),
+    new GetQzoneCommentList(obContext, core),
+    new GetQzoneCommentReplies(obContext, core),
+    new LikeQzone(obContext, core),
+    new UnlikeQzone(obContext, core),
+    new CommentQzone(obContext, core),
+    new GetQzoneProfile(obContext, core),
+    new SetQzoneProfile(obContext, core),
+    new SetQzoneMsgRight(obContext, core),
+    new SetQzoneBan(obContext, core),
+    new GetQzonePublicCapabilities(obContext, core),
+    new GetQzonePublicFeeds(obContext, core),
+    new GetQzonePublicFeedDetail(obContext, core),
+    new GetQzonePublicComments(obContext, core),
+    new GetQzonePublicReplies(obContext, core),
+    new SetQzonePublicUpvote(obContext, core),
+    new SetQzonePublicLike(obContext, core),
+    new SetQzonePublicFollow(obContext, core),
+    new SetQzonePublicCommentLike(obContext, core),
+    new CommentQzonePublicFeed(obContext, core),
+    new ReplyQzonePublicFeed(obContext, core),
+    new DeleteQzonePublicComment(obContext, core),
+    new DeleteQzonePublicReply(obContext, core),
+    new ForwardQzonePublicFeed(obContext, core),
+    new SetGroupMemberInvitePolicy(obContext, core),
+    new SetGroupMemberPermissions(obContext, core),
+    new SetGroupNewMemberHistoryVisibility(obContext, core),
     // onebot11
     new SendLike(obContext, core),
     new GetMsg(obContext, core),

@@ -9,6 +9,7 @@ import { logSubscription, LogWrapper } from 'napcat-core/helper/log';
 import { QQBasicInfoWrapper } from '@/napcat-core/helper/qq-basic-info';
 import { InstanceContext, loadQQWrapper, NapCatCore, NapCatCoreWorkingEnv, NodeIKernelLoginListener, NodeIKernelLoginService, NodeIQQNTWrapperSession, SelfInfo, WrapperNodeApi } from '@/napcat-core';
 import { proxiedListenerOf } from '@/napcat-core/helper/proxy-handler';
+import { createOfflineRecovery } from '@/napcat-core/helper/offline-recovery';
 import { statusHelperSubscription } from '@/napcat-core/helper/status';
 import { applyPendingUpdates } from '@/napcat-webui-backend/src/api/UpdateNapCat';
 import { WebUiDataRuntime } from '@/napcat-webui-backend/src/helper/Data';
@@ -22,7 +23,7 @@ export async function getWebUiUrl () {
 }
 
 export async function NCoreInitFramework (
-  session: NodeIQQNTWrapperSession,
+  session: NodeIQQNTWrapperSession | Promise<NodeIQQNTWrapperSession>,
   loginService: NodeIKernelLoginService,
   registerInitCallback: (callback: () => void) => void
 ) {
@@ -105,6 +106,13 @@ export async function NCoreInitFramework (
       loginContext.isLogined = true;
       WebUiDataRuntime.setQQLoginStatus(true);
       WebUiDataRuntime.setQQLoginError('');
+      const oneBotContext = WebUiDataRuntime.getOneBotContext();
+      if (oneBotContext?.core?.selfInfo) {
+        oneBotContext.core.selfInfo.online = true;
+        WebUiDataRuntime.setQQLoginPhase('ready');
+      } else {
+        WebUiDataRuntime.setQQLoginPhase('initializing');
+      }
       await new Promise<void>(resolve => {
         registerInitCallback(() => resolve());
       });
@@ -118,6 +126,8 @@ export async function NCoreInitFramework (
 
     loginListener.onQRCodeGetPicture = ({ qrcodeUrl }) => {
       WebUiDataRuntime.setQQLoginQrcodeURL(qrcodeUrl);
+      WebUiDataRuntime.setQQLoginError('');
+      WebUiDataRuntime.setQQLoginPhase('waiting_qrcode');
       logger.log('[NapCat] [Framework] 二维码已更新, URL:', qrcodeUrl);
     };
 
@@ -146,9 +156,14 @@ export async function NCoreInitFramework (
         WebUiDataRuntime.setQQQuickLoginList(list.map((item) => item.uin.toString()));
         WebUiDataRuntime.setQQNewLoginList(list);
       }).catch(e => logger.logError('[NapCat] [Framework] 获取登录列表失败:', e));
+      if (!loginContext.isLogined) {
+        const requested = loginService.getQRCodePicture();
+        logger.logWarn('[NapCat] [Framework] 登录服务连接完成，正在获取二维码', { requested, msfStatus: loginService.getMsfStatus() });
+      }
     };
 
     loginListener.onQRCodeSessionUserScaned = () => {
+      WebUiDataRuntime.setQQLoginPhase('qrcode_scanned');
       logger.log('[NapCat] [Framework] 二维码已被扫描，等待确认...');
     };
 
@@ -161,7 +176,10 @@ export async function NCoreInitFramework (
   // 过早进入会导致addKernelMsgListener等Listener添加失败
   // await sleep(2500);
   // 初始化 NapCatFramework
-  const loaderObject = new NapCatFramework(wrapper, session, logger, selfInfo, basicInfoWrapper, pathWrapper, nativePacketHandler, napi2nativeLoader);
+  // 新版 wrapper 的会话由 QQ 在启动过程中创建，dlopen 时可能尚不存在。
+  const wrapperSession = await session;
+  if (!wrapperSession) throw new Error('QQ 未提供有效的 Framework Session');
+  const loaderObject = new NapCatFramework(wrapper, wrapperSession, logger, selfInfo, basicInfoWrapper, pathWrapper, nativePacketHandler, napi2nativeLoader);
   // 将捕获的 passphrase 设置到 core 上，供 DatabaseApi 使用
   if (dbPassphrase) {
     loaderObject.core.dbPassphrase = dbPassphrase;
@@ -194,12 +212,44 @@ export async function NCoreInitFramework (
   const oneBotAdapter = adapterManager.getOneBotAdapter();
   if (oneBotAdapter) {
     WebUiDataRuntime.setOneBotContext(oneBotAdapter);
+    if (WebUiDataRuntime.getQQLoginStatus()) {
+      WebUiDataRuntime.setQQLoginPhase('ready');
+    }
   }
 
-  // 监听下线通知并同步到 WebUI（兜底保障，防止 WebUI 状态不同步）
-  loaderObject.core.event.on('KickedOffLine', () => {
-    WebUiDataRuntime.setQQLoginStatus(false);
+  // 监听下线并同步到 WebUI（兜底保障，防止 WebUI 状态不同步）
+  // KickedOffLine：账号被踢下线；SelfOffline：静默离线（服务端会话语义失效但无通知）。
+  // 两者复用同一条恢复链路：同步 WebUI -> 重启 Worker -> 快速登录。
+  const handleOffline = createOfflineRecovery({
+    isOnline: () => loaderObject.core.selfInfo.online === true,
+    onOffline: (tips) => {
+      WebUiDataRuntime.setQQLoginStatus(false);
+      // 下线后的二维码已失效，绝不能继续交给页面展示或扫码。
+      WebUiDataRuntime.setQQLoginQrcodeURL('');
+      WebUiDataRuntime.setQQLoginError(tips);
+      WebUiDataRuntime.setQQLoginPhase('reconnecting');
+    },
+    onRecovered: () => {
+      WebUiDataRuntime.setQQLoginStatus(true);
+      WebUiDataRuntime.setQQLoginError('');
+      WebUiDataRuntime.setQQLoginPhase('ready');
+    },
+    restart: async (tips) => {
+      try {
+        const restartResult = await WebUiDataRuntime.requestRestartProcess();
+        logger.logWarn('[NapCat] [Framework] 账号已离线，正在重启 Worker 以重新创建 QQ 登录服务', restartResult);
+        if (restartResult.result) return true;
+        WebUiDataRuntime.setQQLoginPhase('offline');
+        WebUiDataRuntime.setQQLoginError(`${tips}\n登录服务重启失败：${restartResult.message}`);
+      } catch (error) {
+        WebUiDataRuntime.setQQLoginPhase('offline');
+        WebUiDataRuntime.setQQLoginError(`${tips}\n登录服务重启失败：${(error as Error).message}`);
+      }
+      return false;
+    },
   });
+  loaderObject.core.event.on('KickedOffLine', (tips: string) => handleOffline(tips, false));
+  loaderObject.core.event.on('SelfOffline', (tips: string) => handleOffline(tips, true));
 }
 
 function registerWebUiLoginCallbacks (
@@ -209,7 +259,22 @@ function registerWebUiLoginCallbacks (
 ) {
   // 刷新二维码
   WebUiDataRuntime.setRefreshQRCodeCallback(async () => {
-    loginService.getQRCodePicture();
+    loginContext.isLogined = false;
+    const msfStatus = loginService.getMsfStatus();
+    if (msfStatus === 2) {
+      WebUiDataRuntime.setQQLoginPhase('reconnecting');
+      const connected = loginService.connect();
+      logger.logWarn('[NapCat] [Framework] 登录服务离线，正在重连以获取二维码', { connected, msfStatus });
+      if (!connected) {
+        throw new Error('QQ 登录服务无法重新连接');
+      }
+      return;
+    }
+    const requested = loginService.getQRCodePicture();
+    logger.logWarn('[NapCat] [Framework] 请求刷新二维码', { requested, msfStatus });
+    if (!requested) {
+      throw new Error('QQ 未接受二维码刷新请求');
+    }
   });
 
   // 快速登录

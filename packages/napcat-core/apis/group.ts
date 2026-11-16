@@ -12,12 +12,19 @@ import {
   ShutUpGroupMember,
   Peer,
   ChatType,
+  GroupManagementSettings,
 } from '@/napcat-core/index';
 import { isNumeric, solveAsyncProblem } from 'napcat-common/src/helper';
 import { LimitedHashTable } from 'napcat-common/src/message-unique';
 import { CancelableTask, TaskExecutor } from 'napcat-common/src/cancel-task';
-import { createGroupDetailInfoV2Param, createGroupExtFilter, createGroupExtInfo } from '../data';
+import {
+  createGroupDetailInfoV2Param,
+  createGroupExtFilter,
+  createGroupExtInfo,
+  createGroupManagementRequests,
+} from '../data';
 import { NTEventWrapper } from '../helper/event';
+import { deleteGroupFiles } from '../helper/group-file';
 
 export class NTQQGroupApi {
   context: InstanceContext;
@@ -168,6 +175,54 @@ export class NTQQGroupApi {
     return this.context.session.getGroupService().modifyGroupDetailInfoV2(param, 0);
   }
 
+  async setGroupMemberInvitePolicy (
+    groupCode: string,
+    policy: NonNullable<GroupManagementSettings['memberInvite']>
+  ) {
+    return this.modifyGroupManagementSettings(groupCode, { memberInvite: policy });
+  }
+
+  async setGroupMemberPermissions (
+    groupCode: string,
+    permissions: Pick<
+      GroupManagementSettings,
+      'allowMemberUploadAlbum' | 'allowMemberTemporarySession' | 'allowMemberCreateGroup'
+    >
+  ) {
+    return this.modifyGroupManagementSettings(groupCode, permissions);
+  }
+
+  async setGroupNewMemberHistoryVisibility (groupCode: string, visible: boolean) {
+    return this.modifyGroupManagementSettings(groupCode, { newMembersSeeRecentHistory: visible });
+  }
+
+  private async modifyGroupManagementSettings (groupCode: string, settings: GroupManagementSettings) {
+    const results: Array<{ setting: string, result: GeneralCallResult; }> = [];
+    const changesKnownFlags = settings.memberInvite !== undefined ||
+      settings.allowMemberUploadAlbum !== undefined ||
+      settings.allowMemberTemporarySession !== undefined ||
+      settings.allowMemberCreateGroup !== undefined ||
+      settings.newMembersSeeRecentHistory !== undefined;
+    const currentDetail = changesKnownFlags ? await this.fetchGroupDetail(groupCode) : undefined;
+
+    for (const request of createGroupManagementRequests(
+      groupCode,
+      settings,
+      currentDetail?.privilegeFlag,
+      currentDetail?.groupFlagExt4
+    )) {
+      results.push({
+        setting: request.setting,
+        result: await this.context.session.getGroupService().modifyGroupDetailInfoV2(
+          request.param,
+          request.operationType
+        ),
+      });
+    }
+
+    return results;
+  }
+
   async setGroupSearch (groupCode: string, option: {
     noCodeFingerOpenFlag?: number;
     noFingerOpenFlag?: number;
@@ -243,6 +298,9 @@ export class NTQQGroupApi {
     const updateCache = async () => {
       try {
         const members = await this.getGroupMemberAll(groupCode, true);
+        if (!members?.result?.infos) {
+          throw new Error(`errCode: ${members?.errCode}, errMsg: ${members?.errMsg}`);
+        }
         this.groupMemberCache.set(groupCode, members.result.infos);
       } catch (e) {
         this.context.logger.logError(`刷新群成员缓存失败, 群号: ${groupCode}, 错误: ${e}`);
@@ -272,37 +330,63 @@ export class NTQQGroupApi {
 
     // 获取群成员缓存
     let members = this.groupMemberCache.get(groupCodeStr);
+    const cached = !!members;
     if (!members) {
       members = (await this.refreshGroupMemberCache(groupCodeStr, true));
     }
 
+    // 刚入的群可能拉不到成员列表，这时 members 为空，不能直接抛错，否则整条群消息都上报不出去
     const getMember = () => {
+      if (!members) {
+        return undefined;
+      }
       if (isNumeric(memberUinOrUidStr)) {
-        return Array.from(members!.values()).find(member => member.uin === memberUinOrUidStr);
+        return Array.from(members.values()).find(member => member.uin?.toString() === memberUinOrUidStr);
       } else {
-        return members!.get(memberUinOrUidStr);
+        return members.get(memberUinOrUidStr);
       }
     };
 
     let member = getMember();
-    // 如果缓存中不存在该成员，尝试刷新缓存
-    if (!member) {
+    // 缓存里没有该成员（比如新入群），刷新一次；上面刚刷新过就不再重复拉取
+    if (!member && cached) {
       members = (await this.refreshGroupMemberCache(groupCodeStr, true));
       member = getMember();
     }
     return member;
   }
 
+  // 从已缓存的群成员里按 QQ 号找 uid，供 uin 转 uid 兜底
+  getUidFromMemberCache (uin: string) {
+    for (const members of this.groupMemberCache.values()) {
+      for (const [uid, member] of members) {
+        if (member.uin?.toString() === uin) {
+          return uid;
+        }
+      }
+    }
+    return undefined;
+  }
+
   async getGroupRecommendContactArkJson (groupCode: string) {
     return this.context.session.getGroupService().getGroupRecommendContactArkJson(groupCode);
+  }
+
+  async getJoinGroupLink (groupCode: string, needShortUrl = true, srcId = 73, additionalParam = '') {
+    return this.context.session.getGroupService().getJoinGroupLink({
+      groupCode,
+      srcId,
+      needShortUrl,
+      additionalParam,
+    });
   }
 
   async creatGroupFileFolder (groupCode: string, folderName: string) {
     return this.context.session.getRichMediaService().createGroupFolder(groupCode, folderName);
   }
 
-  async delGroupFile (groupCode: string, files: Array<string>) {
-    return this.context.session.getRichMediaService().deleteGroupFile(groupCode, [102], files);
+  async delGroupFile (groupCode: string, files: Array<string>, busIds?: Array<number>) {
+    return deleteGroupFiles(this.context.session.getRichMediaService(), groupCode, files, busIds);
   }
 
   async delGroupFileFolder (groupCode: string, folderId: string) {
@@ -477,6 +561,10 @@ export class NTQQGroupApi {
 
   async quitGroup (groupCode: string) {
     return this.context.session.getGroupService().quitGroup(groupCode);
+  }
+
+  async destroyGroup (groupCode: string) {
+    return this.context.session.getGroupService().destroyGroup(groupCode);
   }
 
   async kickMember (groupCode: string, kickUids: string[], refuseForever: boolean = false, kickReason: string = '') {

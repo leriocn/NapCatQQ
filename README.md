@@ -11,10 +11,6 @@ _Modern protocol-side framework implemented based on NTQQ._
 
 ---
 
-## New Framework ?
-
-可以试试更新更好用的 [SnowLuma](https://github.com/SnowLuma/SnowLuma) 作为NapCat Gui替代品。
-
 ## Welcome
 
 - NapCatQQ is a modern implementation of the Bot protocol based on NTQQ.
@@ -75,6 +71,8 @@ _Modern protocol-side framework implemented based on NTQQ._
 - 不过最最重要的 还是需要感谢屏幕前的你哦~
 
 ---
+## Ending
+如果感兴趣可以自行Fork，不再提供除版本更新以外内容，直到失效，如果追求稳定性更推荐官方Bot，非常感谢一路陪伴。
 
 ## License
 

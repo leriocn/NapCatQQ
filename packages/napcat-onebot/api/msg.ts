@@ -74,6 +74,7 @@ type Ob11ToRawConverters = {
 export type SendMessageContext = {
   deleteAfterSentFiles: string[],
   peer: Peer;
+  usePacketVideoMetadata?: boolean;
 };
 
 export type RecvMessageContext = {
@@ -382,6 +383,30 @@ export class OneBotMsgApi {
         }
 
         this.core.context.logger.logError('所有查找方法均失败，获取不到旧客户端的引用消息', element.replayMsgSeq);
+      }
+
+      // 私聊引用：replayMsgSeq 常为 0（客户端未填序号），seq 查询链与协议兜底都会落空，
+      // 而引用元素里的 replyMsgClientSeq / replyMsgTime 此时依然准确，用它反查被引用消息。
+      if (element.replyMsgClientSeq) {
+        try {
+          const replyMsgTime = element.replyMsgTime ?? records?.msgTime;
+          if (replyMsgTime) {
+            const byClientSeq = await this.core.apis.MsgApi.getMsgByClientSeqAndTime(
+              peer,
+              element.replyMsgClientSeq,
+              replyMsgTime
+            );
+            const replyMsg = byClientSeq.msgList?.find(msg => msg.msgId);
+            if (replyMsg) {
+              return createReplyData(replyMsg.msgId);
+            }
+            this.core.context.logger.logWarn(
+              `按 clientSeq 查询未命中，序号: ${element.replayMsgSeq}, clientSeq: ${element.replyMsgClientSeq}`
+            );
+          }
+        } catch (error) {
+          this.core.context.logger.logError('按 clientSeq 查询引用消息出错', error);
+        }
       }
 
       // 协议兜底：尝试通过协议直接获取消息
@@ -859,12 +884,23 @@ export class OneBotMsgApi {
       // 获取签名服务地址
       let signUrl = this.obContext.configLoader.configData.musicSignUrl;
       if (!signUrl) {
-        signUrl = 'https://ss.xingzhige.com/music_card/card';// 感谢思思！已获思思许可 其余地方使用请自行询问
+        signUrl = 'http://106.55.0.102:10087/'; // 首选,yibai音卡签名，已更换稳定签名服务器
       }
 
       // 请求签名服务
       try {
-        const musicJson = await RequestUtil.HttpGetJson<string>(signUrl, 'POST', postData);
+        let musicJson: string;
+        try {
+          musicJson = await RequestUtil.HttpGetJson<string>(signUrl, 'POST', postData);
+        } catch {
+          // 首选失败，降级到备选
+          this.core.context.logger.logError('[音乐卡片签名] 首选地址失败，尝试备选地址...');
+          musicJson = await RequestUtil.HttpGetJson<string>(
+            'https://ss.xingzhige.com/music_card/card', // 思思的音卡签名
+            'POST',
+            postData
+          );
+        }
         return this.ob11ToRawConverters.json({
           data: { data: musicJson },
           type: OB11MessageDataType.json,
@@ -1129,8 +1165,8 @@ export class OneBotMsgApi {
     resMsg.sub_type = 'normal';
     resMsg.group_id = parseInt(msg.peerUin);
     resMsg.group_name = msg.peerName;
-    let member = await this.core.apis.GroupApi.getGroupMember(msg.peerUin, msg.senderUin);
-    if (!member) member = await this.core.apis.GroupApi.getGroupMember(msg.peerUin, msg.senderUin);
+    // getGroupMember 找不到成员时内部已经刷新过一次缓存，这里不用再查第二遍
+    const member = await this.core.apis.GroupApi.getGroupMember(msg.peerUin, msg.senderUin);
     if (member) {
       resMsg.sender.role = OB11Construct.groupMemberRole(member.role);
       resMsg.sender.nickname = member.nick;
@@ -1153,9 +1189,12 @@ export class OneBotMsgApi {
     resMsg.sub_type = 'group';
     const ret = await this.core.apis.MsgApi.getTempChatInfo(ChatType.KCHATTYPETEMPC2CFROMGROUP, msg.senderUid);
     if (ret.result === 0) {
-      // 避免uin:'' uid非空，uid一般不空
-      const member = await this.core.apis.GroupApi.getGroupMember(msg.peerUin, await this.core.apis.UserApi.getUinByUidV2(msg.senderUid));
-      resMsg.group_id = parseInt(ret.tmpChatInfo!.groupCode);
+      // 临时会话的 peerUin 是对方 QQ 号，成员要去来源群里找；uid 一般不空，优先用 uid 查
+      const groupCode = ret.tmpChatInfo!.groupCode;
+      const member = groupCode
+        ? await this.core.apis.GroupApi.getGroupMember(groupCode, msg.senderUid || msg.senderUin)
+        : undefined;
+      resMsg.group_id = parseInt(groupCode);
       resMsg.sender.nickname = member?.nick ?? member?.cardName ?? '临时会话';
       resMsg.temp_source = 0;
     } else {
@@ -1219,7 +1258,10 @@ export class OneBotMsgApi {
   async createSendElements (
     messageData: OB11MessageData[],
     peer: Peer,
-    ignoreTypes: OB11MessageDataType[] = []
+    ignoreTypes: OB11MessageDataType[] = [],
+    options: {
+      usePacketVideoMetadata?: boolean;
+    } = {}
   ) {
     const deleteAfterSentFiles: string[] = [];
     const callResultList: Array<Promise<SendMessageElement | undefined>> = [];
@@ -1236,7 +1278,11 @@ export class OneBotMsgApi {
       }
       const callResult = converter(
         sendMsg,
-        { peer, deleteAfterSentFiles }
+        {
+          peer,
+          deleteAfterSentFiles,
+          usePacketVideoMetadata: options.usePacketVideoMetadata,
+        }
       )?.catch(undefined);
       callResultList.push(callResult);
     }
